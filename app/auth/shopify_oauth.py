@@ -16,8 +16,8 @@ REQUIRED_SCOPES = [
     "write_orders",
     "read_customers",
     "write_customers",
-    "read_webhooks",
-    "write_webhooks",
+    "read_all_orders",
+    "read_products",
 ]
 
 

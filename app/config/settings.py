@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     )
 
     # App Configuration
-    api_version: str = Field(default="2024-01", description="Shopify API version")
+    api_version: str = Field(default="unstable", description="Shopify API version")
     environment: str = Field(
         default="development", description="Environment (development/production)"
     )

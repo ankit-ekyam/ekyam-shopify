@@ -211,13 +211,32 @@ try:
         # Extract shop domain (you may need to store this in the Kafka message or as a header)
         shop_domain = raw_data.get("shop_domain", "")
 
-        # Enrich order data with customer info (optional)
+        # Extract customer info directly from the payload instead of making a slow API call
         enriched_customer = None
-        if shop_domain:
-            enriched_customer = enrich_order_with_customer_data(shop_domain, raw_data)
+        customer_data = raw_data.get("customer")
+        if customer_data and customer_data.get("id"):
+            first_name = customer_data.get("first_name", "") or ""
+            last_name = customer_data.get("last_name", "") or ""
+            name = f"{first_name} {last_name}".strip()
+            
+            enriched_customer = {
+                "customer_id": str(customer_data.get("id")),
+                "customer_name": name,
+                "customer_email": customer_data.get("email"),
+                "customer_phone": customer_data.get("phone"),
+                "customer_lifetime_value": float(customer_data.get("total_spent") or 0.0),
+            }
 
         # Transform to Ekyam standard
         standardized_data = transform_to_ekyam_standard(raw_data, enriched_customer)
+
+        # Add a validation step to ensure we have an ID before saving.
+        # If multiple messages lack an ID, they would overwrite each other in MongoDB.
+        if not standardized_data.get("ext_order_id"):
+            logger.error(
+                "Skipping order with missing ID. Raw data: %s", raw_data
+            )
+            continue
 
         try:
             orders_collection.update_one(

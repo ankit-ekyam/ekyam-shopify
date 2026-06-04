@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 import json
 import logging
 import secrets
+import requests
 
 from app.config.settings import get_settings
 from app.database import get_mongo_db, close_mongo_connection
@@ -178,51 +179,101 @@ def register_webhooks(shop: str = None):
 
 
 # ========================
+# Background Tasks
+# ========================
+def process_orders_batch(orders: list, shop: str):
+    """Process a batch of orders and push them to Kafka."""
+    for order in orders:
+        order["shop_domain"] = shop
+        order_id = str(order.get("id", "unknown"))
+        push_to_kafka(kafka_producer, "shopify.raw.orders", order, key=order_id)
+
+# ========================
+# Sync Endpoints
+# ========================
+@app.get("/sync-orders")
+async def sync_orders(
+    shop: str,
+    background_tasks: BackgroundTasks,
+    limit: int = Query(50, ge=1, le=250, description="Number of orders to fetch per page"),
+    page_info: str = None,
+):
+    """
+    Pull old orders from Shopify and push them to Kafka.
+    Supports cursor-based pagination via the page_info parameter.
+    """
+    if not shop:
+        raise HTTPException(status_code=400, detail="shop parameter is required")
+
+    if not shop.endswith(".myshopify.com") and not shop.endswith("myshopify.com"):
+        shop = f"{shop}.myshopify.com"
+
+    token = oauth2.get_access_token(shop)
+    if not token:
+        raise HTTPException(status_code=400, detail="App not installed for this shop. Please go to /install first.")
+
+    api = ShopifyAPI(shop, token, settings.api_version)
+    try:
+        orders, next_page_info = api.list_orders_graphql(limit=limit, page_info=page_info)
+    except requests.exceptions.RequestException as e:
+        error_msg = str(e)
+        if hasattr(e, "response") and e.response is not None:
+            # Extract the exact JSON or HTML response from Shopify
+            error_msg = e.response.text
+        raise HTTPException(status_code=502, detail=f"Shopify API Error: {error_msg}")
+
+    if orders:
+        background_tasks.add_task(process_orders_batch, orders, shop)
+
+    return JSONResponse(
+        {
+            "status": "success",
+            "message": f"Queued {len(orders)} orders for processing.",
+            "next_page_info": next_page_info,
+            "has_next_page": bool(next_page_info)
+        }
+    )
+
+
+# ========================
 # Webhook Endpoints
 # ========================
-@app.post("/webhooks/shopify/orders")
-async def receive_shopify_order(request: Request, background_tasks: BackgroundTasks):
+async def verify_shopify_webhook(request: Request):
     """
-    Shopify Orders Webhook Endpoint.
-
-    Receives order webhooks from Shopify.
-    Verifies HMAC signature and pushes to Kafka for processing.
+    A FastAPI dependency that verifies the incoming webhook's HMAC signature
+    and returns the parsed JSON payload.
     """
-    # Get raw request body for HMAC verification
     request_body = await request.body()
-
-    # Get HMAC header
     hmac_header = request.headers.get("X-Shopify-Hmac-SHA256")
     if not hmac_header:
         logger.warning("Webhook received without HMAC header")
         raise HTTPException(status_code=401, detail="Missing HMAC signature")
 
-    # Verify webhook signature
     if not oauth2.verify_webhook(request_body, hmac_header):
         logger.warning("Webhook HMAC verification failed")
         raise HTTPException(status_code=401, detail="Invalid HMAC signature")
 
-    # Parse payload
     try:
         payload = json.loads(request_body.decode("utf-8"))
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Get shop domain from headers (Shopify includes this)
     shop_domain = request.headers.get("X-Shopify-Shop-Domain")
     payload["shop_domain"] = shop_domain
+    return payload
 
-    # Log webhook receipt
+
+@app.post("/webhooks/shopify/orders")
+async def receive_shopify_order(
+    background_tasks: BackgroundTasks,
+    payload: dict = Depends(verify_shopify_webhook),
+):
+    """Shopify Orders Webhook Endpoint (for new orders)."""
     logger.info(f"Received order webhook for order {payload.get('id')}")
 
-    # Push to Kafka in background
     order_id = str(payload.get("id", "unknown"))
     background_tasks.add_task(
-        push_to_kafka,
-        kafka_producer,
-        "shopify.raw.orders",
-        payload,
-        key=order_id,
+        push_to_kafka, kafka_producer, "shopify.raw.orders", payload, key=order_id
     )
 
     return JSONResponse({"status": "accepted"})
@@ -230,26 +281,11 @@ async def receive_shopify_order(request: Request, background_tasks: BackgroundTa
 
 @app.post("/webhooks/shopify/orders/updated")
 async def receive_shopify_order_updated(
-    request: Request, background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    payload: dict = Depends(verify_shopify_webhook),
 ):
     """Shopify Orders Updated Webhook Endpoint."""
-    # Same verification and processing as orders created
-    request_body = await request.body()
-    hmac_header = request.headers.get("X-Shopify-Hmac-SHA256")
-
-    if not hmac_header:
-        raise HTTPException(status_code=401, detail="Missing HMAC signature")
-
-    if not oauth2.verify_webhook(request_body, hmac_header):
-        raise HTTPException(status_code=401, detail="Invalid HMAC signature")
-
-    try:
-        payload = json.loads(request_body.decode("utf-8"))
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
-
-    shop_domain = request.headers.get("X-Shopify-Shop-Domain")
-    payload["shop_domain"] = shop_domain
+    logger.info(f"Received order/updated webhook for order {payload.get('id')}")
 
     order_id = str(payload.get("id", "unknown"))
     background_tasks.add_task(
