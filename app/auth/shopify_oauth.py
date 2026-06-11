@@ -1,6 +1,7 @@
 """Shopify OAuth2 authentication module."""
 
 import logging
+import re
 import requests
 from urllib.parse import urlencode
 from datetime import datetime
@@ -28,6 +29,15 @@ class ShopifyOAuth2:
         self.settings = settings
         self.db = db
         self.store_collection = db[settings.mongo_collection_stores]
+        
+    def _validate_shop_domain(self, shop_domain: str) -> str:
+        """Ensure the shop domain adheres to strict Shopify domain standards."""
+        if not shop_domain.endswith(".myshopify.com"):
+            shop_domain = f"{shop_domain}.myshopify.com"
+        
+        if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop_domain):
+            raise ValueError(f"Invalid shop domain format: {shop_domain}")
+        return shop_domain
 
     def get_authorization_url(self, shop_domain: str, state: str) -> str:
         """
@@ -47,9 +57,7 @@ class ShopifyOAuth2:
             "state": state,
         }
 
-        # Ensure shop_domain is correct format
-        if not shop_domain.endswith(".myshopify.com"):
-            shop_domain = f"{shop_domain}.myshopify.com"
+        shop_domain = self._validate_shop_domain(shop_domain)
 
         auth_url = f"https://{shop_domain}/admin/oauth/authorize?{urlencode(params)}"
         logger.info(f"Generated authorization URL for {shop_domain}")
@@ -68,8 +76,7 @@ class ShopifyOAuth2:
         Returns:
             Dictionary with access_token and scope, or None if failed
         """
-        if not shop_domain.endswith(".myshopify.com"):
-            shop_domain = f"{shop_domain}.myshopify.com"
+        shop_domain = self._validate_shop_domain(shop_domain)
 
         token_url = f"https://{shop_domain}/admin/oauth/access_token"
 
@@ -101,8 +108,7 @@ class ShopifyOAuth2:
         AccessScope endpoint returns the scopes currently associated with the
         token and is the source of truth for what should be persisted.
         """
-        if not shop_domain.endswith(".myshopify.com"):
-            shop_domain = f"{shop_domain}.myshopify.com"
+        shop_domain = self._validate_shop_domain(shop_domain)
 
         scopes_url = f"https://{shop_domain}/admin/oauth/access_scopes.json"
         headers = {"X-Shopify-Access-Token": access_token}
@@ -134,6 +140,8 @@ class ShopifyOAuth2:
             True if successful, False otherwise
         """
         try:
+            shop_domain = self._validate_shop_domain(shop_domain)
+            
             # Extract shop ID from domain
             shop_id = shop_domain.split(".")[0]
             access_token = token_data.get("access_token", "")
@@ -180,6 +188,7 @@ class ShopifyOAuth2:
             Access token if found and active, None otherwise
         """
         try:
+            shop_domain = self._validate_shop_domain(shop_domain)
             store = self.store_collection.find_one(
                 {"shop_domain": shop_domain, "is_active": True}
             )
@@ -202,6 +211,7 @@ class ShopifyOAuth2:
             Store document if found and active, None otherwise
         """
         try:
+            shop_domain = self._validate_shop_domain(shop_domain)
             store = self.store_collection.find_one(
                 {"shop_domain": shop_domain, "is_active": True}
             )

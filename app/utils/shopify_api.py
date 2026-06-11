@@ -1,6 +1,7 @@
 """Shopify API utilities."""
 
 import requests
+import re
 import logging
 from typing import Optional
 
@@ -21,6 +22,11 @@ class ShopifyAPI:
             access_token: OAuth2 access token
             api_version: Shopify API version
         """
+        if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop_domain):
+            raise ValueError(f"Invalid shop domain format: {shop_domain}")
+        if not access_token:
+            raise ValueError("Access token cannot be empty")
+            
         self.shop_domain = shop_domain
         self.access_token = access_token
         self.api_version = api_version

@@ -3,7 +3,9 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 import json
 import logging
 import secrets
+import re
 import requests
+from pydantic import BaseModel, Field
 
 from app.config.settings import get_settings
 from app.database import get_mongo_db, close_mongo_connection
@@ -17,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 # Initialize settings
 settings = get_settings()
+
+# Pydantic Models for Validation
+class MappingPayload(BaseModel):
+    source: str = Field(..., description="The source system, e.g., 'shopify'")
+    entity: str = Field(..., description="The entity name, e.g., 'orders'")
+    primary_key: str = Field(..., description="The primary key field name in the standardized data")
+    mapping: dict = Field(..., description="The mapping rules dictionary")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -77,8 +86,8 @@ def install_app(shop: str = None):
         raise HTTPException(status_code=400, detail="shop parameter is required")
 
     # Validate shop domain format
-    if not shop.endswith(".myshopify.com") and not shop.endswith("myshopify.com"):
-        shop = f"{shop}.myshopify.com"
+    if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop):
+        raise HTTPException(status_code=400, detail="Invalid shop domain format")
 
     # Generate a random state for CSRF protection
     state = secrets.token_urlsafe(32)
@@ -105,6 +114,7 @@ def oauth_callback(
     shop: str = None,
     state: str = None,
     hmac: str = None,
+    error: str = None,
 ):
     """
     OAuth2 callback endpoint.
@@ -112,6 +122,10 @@ def oauth_callback(
     Shopify redirects here after user approves app installation.
     Exchanges the authorization code for an access token.
     """
+    # Catch explicit Shopify errors (e.g., User declined permissions)
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth Error: {error}")
+
     # Validate state (CSRF protection)
     stored_state = request.cookies.get("oauth_state")
     stored_shop = request.cookies.get("oauth_shop")
@@ -165,8 +179,8 @@ def register_webhooks(shop: str = None):
     if not shop:
         raise HTTPException(status_code=400, detail="Missing shop parameter")
 
-    if not shop.endswith(".myshopify.com") and not shop.endswith("myshopify.com"):
-        shop = f"{shop}.myshopify.com"
+    if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop):
+        raise HTTPException(status_code=400, detail="Invalid shop domain format")
 
     token = oauth2.get_access_token(shop)
     if not token:
@@ -207,12 +221,16 @@ async def sync_entity(
     if not shop:
         raise HTTPException(status_code=400, detail="shop parameter is required")
 
-    if not shop.endswith(".myshopify.com") and not shop.endswith("myshopify.com"):
-        shop = f"{shop}.myshopify.com"
+    if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop):
+        raise HTTPException(status_code=400, detail="Invalid shop domain format")
         
     valid_entities = ["orders", "products", "customers"]
     if entity not in valid_entities:
         raise HTTPException(status_code=400, detail=f"Unsupported entity: {entity}. Must be one of {valid_entities}.")
+        
+    # Validate page_info cursor format if provided
+    if page_info and not re.match(r"^[A-Za-z0-9+/=_-]+$", page_info):
+        raise HTTPException(status_code=400, detail="Invalid cursor format for page_info")
     
     # Get the store's VIP pass
     store_data = oauth2.get_store_data(shop)
@@ -286,6 +304,9 @@ async def verify_shopify_webhook(request: Request):
         payload = json.loads(request_body.decode("utf-8"))
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON payload must be a JSON object/dictionary")
 
     shop_domain = request.headers.get("X-Shopify-Shop-Domain")
     payload["shop_domain"] = shop_domain
@@ -351,7 +372,7 @@ async def get_mapping(source: str, entity: str):
     return JSONResponse({"status": "success", "mapping": mapping})
 
 @app.post("/mappings")
-async def create_or_update_mapping(payload: dict):
+async def create_or_update_mapping(payload: MappingPayload):
     """
     Create or update a source mapping dynamically.
     Example Payload:
@@ -362,15 +383,13 @@ async def create_or_update_mapping(payload: dict):
         "mapping": { ... }
     }
     """
-    source = payload.get("source")
-    entity = payload.get("entity")
-    if not source or not entity:
-        raise HTTPException(status_code=400, detail="Payload must include 'source' and 'entity'")
+    source = payload.source
+    entity = payload.entity
     
     mappings_collection = db[settings.mongo_collection_mappings]
     mappings_collection.update_one(
         {"source": source, "entity": entity},
-        {"$set": payload},
+        {"$set": payload.model_dump()},
         upsert=True
     )
     return JSONResponse({"status": "success", "message": f"Mapping for {source} -> {entity} saved successfully"})

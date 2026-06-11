@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import re
 from datetime import datetime, UTC
 
 from confluent_kafka import Consumer, KafkaError
@@ -155,6 +156,18 @@ def apply_mapping_rule(data: dict, rule_config, field_name: str):
         except (ValueError, TypeError):
             raise ValueError(f"Validation Error: Field '{field_name}' cannot be cast to '{expected_type}'. Value: {val}")
     
+    # 3. Validation: Advanced Checks (Min/Max/Regex)
+    if val is not None and val != "":
+        if "min" in rule_config and val < rule_config["min"]:
+            raise ValueError(f"Validation Error: '{field_name}' ({val}) is less than minimum {rule_config['min']}.")
+        if "max" in rule_config and val > rule_config["max"]:
+            raise ValueError(f"Validation Error: '{field_name}' ({val}) is greater than maximum {rule_config['max']}.")
+        if expected_type == "str" and "pattern" in rule_config:
+            if not re.match(rule_config["pattern"], str(val)):
+                raise ValueError(f"Validation Error: '{field_name}' ({val}) does not match required pattern.")
+        if "allowed_values" in rule_config and val not in rule_config["allowed_values"]:
+            raise ValueError(f"Validation Error: '{field_name}' ({val}) is not in allowed values: {rule_config['allowed_values']}.")
+
     return val
 
 def standardize_entity(source: str, entity: str, raw_data: dict, enriched_data: dict = None) -> tuple[dict, str]:
@@ -233,12 +246,14 @@ try:
 
             # Determine the source and entity from the Kafka topic
             topic = msg.topic() or ""
-            parts = topic.split(".")
-            if len(parts) >= 3:
-                source, entity = parts[0], parts[2]
-            else:
+            
+            # Strict topic regex structure (e.g. 'shopify.raw.orders' or 'shopify.raw.orders.updated')
+            if not re.match(r"^[a-zA-Z0-9_-]+\.raw\.[a-zA-Z0-9_-]+(?:\.updated)?$", topic):
                 logger.warning("Unrecognized topic format: %s", topic)
                 continue
+                
+            parts = topic.split(".")
+            source, entity = parts[0], parts[2]
 
             enriched_customer = None
             
