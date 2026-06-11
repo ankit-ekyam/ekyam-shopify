@@ -32,8 +32,14 @@ class Settings(BaseSettings):
     mongo_collection_orders: str = Field(
         default="shopify_orders", description="MongoDB collection for orders"
     )
+    mongo_collection_products: str = Field(
+        default="shopify_products", description="MongoDB collection for products"
+    )
     mongo_collection_stores: str = Field(
         default="shopify_stores", description="MongoDB collection for stores"
+    )
+    mongo_collection_mappings: str = Field(
+        default="source_mappings", description="MongoDB collection for field mappings"
     )
 
     # App Configuration

@@ -191,6 +191,25 @@ class ShopifyOAuth2:
             logger.error(f"Failed to retrieve access token: {e}")
             return None
 
+    def get_store_data(self, shop_domain: str) -> dict | None:
+        """
+        Retrieve the full store document from MongoDB.
+
+        Args:
+            shop_domain: Shopify store domain
+
+        Returns:
+            Store document if found and active, None otherwise
+        """
+        try:
+            store = self.store_collection.find_one(
+                {"shop_domain": shop_domain, "is_active": True}
+            )
+            return store
+        except Exception as e:
+            logger.error(f"Failed to retrieve store data: {e}")
+            return None
+
     def verify_webhook(self, request_body: bytes, hmac_header: str) -> bool:
         """
         Verify Shopify webhook HMAC signature.

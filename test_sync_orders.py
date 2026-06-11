@@ -3,9 +3,9 @@ import time
 import sys
 
 # Configuration
-API_URL = "http://localhost:8000/sync-orders"
+API_URL = "http://localhost:8000/sync/orders"
 SHOP = "devekyam.myshopify.com"
-LIMIT = 10  # Keeping it small forces multiple pages during testing
+LIMIT = 30  # Keeping it small forces multiple pages during testing
 
 def test_historical_sync():
     print(f"Starting historical sync test for {SHOP}...")
@@ -18,7 +18,7 @@ def test_historical_sync():
     while has_next_page:
         params = {"shop": SHOP, "limit": LIMIT}
         if page_info:
-            params["page_info"] = page_info
+            params["page_info"] = page_info  # The cursor to the next small chunk
             
         print(f"\nFetching page {page_count + 1}...")
         
@@ -34,7 +34,7 @@ def test_historical_sync():
             response.raise_for_status()
             data = response.json()
             
-            # Extract pagination data
+            # Extract pagination data to fetch the next batch
             page_info = data.get("next_page_info")
             has_next_page = data.get("has_next_page", False)
             

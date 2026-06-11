@@ -51,6 +51,10 @@ try:
             print(f"Consumer error: {msg.error()}")
             continue
 
+        if msg.value() is None:
+            print("Skipping message with no value (tombstone)")
+            continue
+
         # 1. Pull the raw data
         raw_data = json.loads(msg.value().decode("utf-8"))
         # print(f"Pulled raw order: {raw_data.get('id')}")
