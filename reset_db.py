@@ -1,9 +1,11 @@
 from pymongo import MongoClient
+from app.config.settings import get_settings
 
 def reset():
+    settings = get_settings()
     # Connect to local MongoDB
-    client = MongoClient("mongodb://127.0.0.1:27017")
-    db = client["ekyam"]
+    client = MongoClient(settings.mongo_uri)
+    db = client[settings.mongo_db]
     
     # Force delete the store record
     token_result = db["shopify_stores"].delete_many({"shop_domain": "devekyam.myshopify.com"})
@@ -12,6 +14,10 @@ def reset():
     # Also clear out any previously synced orders for a clean test run
     orders_result = db["shopify_orders"].delete_many({})
     print(f"✅ Deleted {orders_result.deleted_count} old order records from MongoDB.")
+
+    # Clear mappings to ensure fresh rules are applied
+    mappings_result = db[settings.mongo_collection_mappings].delete_many({})
+    print(f"✅ Deleted {mappings_result.deleted_count} old mapping rules from MongoDB.")
 
 if __name__ == "__main__":
     reset()

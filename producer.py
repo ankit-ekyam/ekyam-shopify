@@ -12,6 +12,7 @@ from app.database import get_mongo_db, close_mongo_connection
 from app.auth.shopify_oauth import ShopifyOAuth2
 from app.utils.shopify_api import ShopifyAPI
 from app.utils.kafka_utils import get_kafka_producer, push_to_kafka
+from app.utils.shopify_pusher import ShopifyDataPusher
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -26,6 +27,12 @@ class MappingPayload(BaseModel):
     entity: str = Field(..., description="The entity name, e.g., 'orders'")
     primary_key: str = Field(..., description="The primary key field name in the standardized data")
     mapping: dict = Field(..., description="The mapping rules dictionary")
+
+class PushPayload(BaseModel):
+    target_shop: str = Field(..., description="Target Shopify store domain (e.g., 'other-shop.myshopify.com')")
+    target_token: str = Field(..., description="Access token for the target store")
+    entity: str = Field(..., description="Entity to push (singular), e.g., 'product', 'customer'")
+    data: dict = Field(..., description="The data payload to push to the target store")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -393,3 +400,24 @@ async def create_or_update_mapping(payload: MappingPayload):
         upsert=True
     )
     return JSONResponse({"status": "success", "message": f"Mapping for {source} -> {entity} saved successfully"})
+
+# ========================
+# Push Endpoints
+# ========================
+@app.post("/push-to-store")
+async def push_data_to_store(payload: PushPayload):
+    """
+    Pushes data to a different Shopify account using the static ShopifyDataPusher class.
+    """
+    result = ShopifyDataPusher.push_entity(
+        shop_domain=payload.target_shop,
+        access_token=payload.target_token,
+        api_version=settings.api_version,
+        entity_name=payload.entity,
+        entity_data=payload.data
+    )
+
+    if result is None:
+        raise HTTPException(status_code=500, detail=f"Failed to push {payload.entity} to {payload.target_shop}")
+
+    return JSONResponse({"status": "success", "data": result})

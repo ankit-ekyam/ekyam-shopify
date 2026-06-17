@@ -79,7 +79,7 @@ def get_nested_value(data: dict, path: str, default=None):
 
 # In-memory cache to prevent querying MongoDB for every single message
 SOURCE_MAPPINGS_CACHE = {}
-CACHE_TTL_SECONDS = 300  # 5 minutes
+CACHE_TTL_SECONDS = 10   # 10 seconds for development (change back to 300 for production)
 
 def get_source_mapping(source: str, entity: str) -> dict:
     """Fetch entity-specific field mapping from cache or dynamically from MongoDB."""
@@ -279,7 +279,10 @@ try:
                     upsert=True
                 ))
             except Exception as exc:
-                logger.error("Failed to process %s %s: %s", source, entity, exc)
+                logger.error(
+                    "Failed to process %s %s: %s. Raw Data: %s",
+                    source, entity, exc, json.dumps(raw_data)
+                )
                 continue
                 
         # Execute database updates natively for each entity involved in this batch

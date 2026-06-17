@@ -32,7 +32,7 @@ def seed_mappings():
                 "order_lines": {
                     "path": "line_items",
                     "fields": {
-                        "ext_product_id": {"path": "product_id", "required": True},
+                        "ext_product_id": {"path": "product_id", "required": False, "default": "custom_or_deleted_product"},
                         "sku": "sku",
                         "quantity": {"path": "quantity", "type": "int"},
                         "unit_price": {"path": "price", "type": "float"}
