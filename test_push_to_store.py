@@ -103,7 +103,7 @@ def main():
         return
         
     logger.info(f"Found {len(orders_to_process)} orders to process. Target store: {target_store['shop_domain']}")
-
+   # TODO : 
     for order in orders_to_process:
         source = order.get("source_system", "shopify")
         entity = order.get("entity_type", "orders")

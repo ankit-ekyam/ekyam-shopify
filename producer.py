@@ -5,6 +5,7 @@ import logging
 import secrets
 import re
 import requests
+import time
 from pydantic import BaseModel, Field
 
 from app.config.settings import get_settings
@@ -33,6 +34,10 @@ class PushPayload(BaseModel):
     target_token: str = Field(..., description="Access token for the target store")
     entity: str = Field(..., description="Entity to push (singular), e.g., 'product', 'customer'")
     data: dict = Field(..., description="The data payload to push to the target store")
+
+class PushAllPayload(BaseModel):
+    target_shop: str = Field(..., description="Target Shopify store domain (e.g., 'other-shop.myshopify.com')")
+    target_token: str = Field(..., description="Access token for the target store")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -421,3 +426,90 @@ async def push_data_to_store(payload: PushPayload):
         raise HTTPException(status_code=500, detail=f"Failed to push {payload.entity} to {payload.target_shop}")
 
     return JSONResponse({"status": "success", "data": result})
+
+# ========================
+# Bulk Push All Endpoints
+# ========================
+def set_nested_value(data: dict, path: str, value):
+    """Helper to set nested dictionary values using dot notation."""
+    if not path: return
+    parts = path.split('.')
+    current = data
+    for part in parts[:-1]:
+        if part not in current or not isinstance(current[part], dict):
+            current[part] = {}
+        current = current[part]
+    current[parts[-1]] = value
+
+def reverse_map_entity(ekyam_data: dict, mapping_config: dict) -> dict:
+    """Converts Ekyam standardized data back to the source system format."""
+    raw_data = {}
+    for ekyam_field, rule in mapping_config.get("fields", {}).items():
+        if ekyam_field not in ekyam_data or ekyam_data[ekyam_field] is None: continue
+        val = ekyam_data[ekyam_field]
+        path = rule if isinstance(rule, str) else rule.get("path")
+        if path: set_nested_value(raw_data, path, val)
+
+    for list_field, list_config in mapping_config.get("lists", {}).items():
+        if list_field not in ekyam_data or not ekyam_data[list_field]: continue
+        ekyam_list = ekyam_data[list_field]
+        target_path = list_config.get("path", "")
+        raw_list = []
+        for item in ekyam_list:
+            mapped_item = {}
+            for item_ekyam_field, rule in list_config.get("fields", {}).items():
+                if item_ekyam_field not in item or item[item_ekyam_field] is None: continue
+                val = item[item_ekyam_field]
+                item_path = rule if isinstance(rule, str) else rule.get("path")
+                if item_path: set_nested_value(mapped_item, item_path, val)
+            raw_list.append(mapped_item)
+        if target_path: set_nested_value(raw_data, target_path, raw_list)
+    return raw_data
+
+def process_bulk_push(records: list, target_shop: str, target_token: str, entity: str):
+    """Background task to map and push all records to Shopify."""
+    mappings_collection = db[settings.mongo_collection_mappings]
+    for record in records:
+        source = record.get("source_system", "shopify")
+        mapping_doc = mappings_collection.find_one({"source": source, "entity": entity})
+        if not mapping_doc or "mapping" not in mapping_doc:
+            continue
+            
+        raw_shopify_payload = reverse_map_entity(record, mapping_doc["mapping"])
+        raw_shopify_payload.pop("id", None)
+        raw_shopify_payload.pop("shop_domain", None)
+        
+        if "line_items" in raw_shopify_payload:
+            for item in raw_shopify_payload["line_items"]:
+                if "title" not in item:
+                    item["title"] = item.get("sku", "Custom Product")
+                    
+        entity_singular = entity[:-1] if entity.endswith("s") else entity
+        
+        # Construct message for Kafka
+        push_message = {
+            "target_shop": target_shop,
+            "target_token": target_token,
+            "entity_name": entity_singular,
+            "payload": raw_shopify_payload
+        }
+        
+        # Push to Kafka instead of Shopify directly
+        push_to_kafka(kafka_producer, f"shopify.push.{entity}", push_message)
+
+@app.post("/push-all-to-store/{entity}")
+async def push_all_data_to_store(entity: str, payload: PushAllPayload, background_tasks: BackgroundTasks):
+    """Fetches all standardized data from MongoDB and pushes to the target store."""
+    valid_entities = ["orders", "products", "customers"]
+    if entity not in valid_entities:
+        raise HTTPException(status_code=400, detail=f"Unsupported entity: {entity}. Must be one of {valid_entities}.")
+        
+    collection_name = settings.mongo_collection_orders if entity == "orders" else f"ekyam_{entity}"
+    collection = db[collection_name]
+    records = list(collection.find({}, {"_id": 0}))
+    
+    if not records:
+        return JSONResponse({"status": "success", "message": f"No {entity} found in database to push."})
+        
+    background_tasks.add_task(process_bulk_push, records, payload.target_shop, payload.target_token, entity)
+    return JSONResponse({"status": "success", "message": f"Started background task to push {len(records)} {entity} to {payload.target_shop}."})

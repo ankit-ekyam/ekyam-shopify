@@ -180,7 +180,7 @@ class ShopifyAPI:
         
         query = """
         query getOrders($limit: Int!, $cursor: String) {
-          orders(first: $limit, after: $cursor, sortKey: CREATED_AT, reverse: true) {
+          orders(first: $limit, after: $cursor, sortKey: CREATED_AT, reverse: true, query: "status:open") {
             pageInfo {
               hasNextPage
               endCursor

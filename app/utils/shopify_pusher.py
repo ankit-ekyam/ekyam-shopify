@@ -2,6 +2,7 @@
 
 import logging
 import requests
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -28,18 +29,30 @@ class ShopifyDataPusher:
             "X-Shopify-Access-Token": access_token,
             "Content-Type": "application/json",
         }
-        try:
-            response = requests.request(method, url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            
-            # DELETE responses might be empty
-            return response.json() if response.text else {}
-        except requests.exceptions.RequestException as e:
-            error_msg = str(e)
-            if hasattr(e, "response") and e.response is not None:
-                error_msg += f" | Response: {e.response.text}"
-            logger.error(f"Failed to {method} {endpoint} for {shop_domain}: {error_msg}")
-            return None
+        
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.request(method, url, headers=headers, json=payload, timeout=10)
+                response.raise_for_status()
+                
+                # DELETE responses might be empty
+                return response.json() if response.text else {}
+                
+            except requests.exceptions.RequestException as e:
+                if hasattr(e, "response") and e.response is not None and e.response.status_code == 429:
+                    logger.warning(f"⚠️ Rate limit hit for {shop_domain}. Sleeping for 60 seconds before retry...")
+                    time.sleep(60) # Wait a full minute as per Shopify's dev store limits
+                    continue # Retry the exact same request
+                    
+                error_msg = str(e)
+                if hasattr(e, "response") and e.response is not None:
+                    error_msg += f" | Response: {e.response.text}"
+                logger.error(f"Failed to {method} {endpoint} for {shop_domain}: {error_msg}")
+                return None
+                
+        logger.error(f"❌ Max retries exceeded for {method} {endpoint} on {shop_domain}")
+        return None
 
     @staticmethod
     def push_entity(
