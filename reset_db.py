@@ -15,9 +15,5 @@ def reset():
     orders_result = db["shopify_orders"].delete_many({})
     print(f"✅ Deleted {orders_result.deleted_count} old order records from MongoDB.")
 
-    # Clear mappings to ensure fresh rules are applied
-    mappings_result = db[settings.mongo_collection_mappings].delete_many({})
-    print(f"✅ Deleted {mappings_result.deleted_count} old mapping rules from MongoDB.")
-
 if __name__ == "__main__":
     reset()

@@ -7,24 +7,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 def seed_mappings():
-    """Seeds initial source mappings into the MongoDB database."""
     settings = get_settings()
     client = MongoClient(settings.mongo_uri)
     db = client[settings.mongo_db]
-    mappings_collection = db[settings.mongo_collection_mappings]
+    mappings_collection = db["mappings"]
 
-    # 1. Shopify Orders Mapping
-    shopify_orders_mapping = {
-        "source": "shopify",
+    # 1. Shopify Inbound Mapping (Shopify -> Ekyam)
+    shopify_inbound = {
+        "direction": "inbound",
+        "source_system": "shopify",
         "entity": "orders",
-        "primary_key": "ext_order_id",
         "mapping": {
             "fields": {
-                "ext_order_id": {"path": "id", "required": True, "type": "str"},
-                "shop_domain": {"path": "shop_domain", "required": True},
+                "ext_order_id": "id",
                 "event_timestamp": "created_at",
-                "order_total_amt": {"path": "total_price", "type": "float"},
-                "currency": {"path": "currency", "default": "USD", "type": "str"},
+                "order_total_amt": "total_price",
+                "currency": "currency",
                 "customer_email": "email",
                 "customer_id": "customer.id"
             },
@@ -32,49 +30,56 @@ def seed_mappings():
                 "order_lines": {
                     "path": "line_items",
                     "fields": {
-                        "ext_product_id": {"path": "product_id", "required": False, "default": "custom_or_deleted_product"},
+                        "ext_product_id": "product_id",
                         "sku": "sku",
-                        "quantity": {"path": "quantity", "type": "int"},
-                        "unit_price": {"path": "price", "type": "float"}
+                        "quantity": "quantity",
+                        "unit_price": "price"
                     }
                 }
             }
         }
     }
 
-    # 2. Custom Orders Mapping Example
-    custom_orders_mapping = {
-        "source": "custom",
+    # 2. Shopify Outbound Mapping (Ekyam -> Shopify)
+    shopify_outbound = {
+        "direction": "outbound",
+        "target_system": "shopify",
         "entity": "orders",
-        "primary_key": "ext_order_id",
         "mapping": {
             "fields": {
-                "ext_order_id": {"path": "order_id", "required": True, "type": "str"},
-                "shop_domain": {"path": "source_system", "default": "custom_app"},
-                "event_timestamp": "timestamp",
-                "order_total_amt": {"path": "total_amount", "type": "float"},
-                "currency": {"path": "currency", "default": "USD", "type": "str"},
-                "customer_email": "customer_email"
+                "created_at": "event_timestamp",
+                "total_price": "order_total_amt",
+                "currency": "currency",
+                "email": "customer_email",
+                "customer_id": "customer_id"
             },
             "lists": {
-                "order_lines": {
-                    "path": "items",
+                "line_items": {
+                    "path": "order_lines",
                     "fields": {
-                        "ext_product_id": {"path": "id", "required": True},
+                        "product_id": "ext_product_id",
                         "sku": "sku",
-                        "quantity": {"path": "qty", "type": "int"},
-                        "unit_price": {"path": "price", "type": "float"}
+                        "quantity": "quantity",
+                        "price": "unit_price"
                     }
                 }
             }
         }
     }
 
-    # Upsert the mappings into MongoDB
-    mappings_collection.update_one({"source": "shopify", "entity": "orders"}, {"$set": shopify_orders_mapping}, upsert=True)
-    mappings_collection.update_one({"source": "custom", "entity": "orders"}, {"$set": custom_orders_mapping}, upsert=True)
+    # Insert the rules into the DB
+    mappings_collection.update_one(
+        {"direction": "inbound", "source_system": "shopify", "entity": "orders"}, 
+        {"$set": shopify_inbound}, 
+        upsert=True
+    )
+    mappings_collection.update_one(
+        {"direction": "outbound", "target_system": "shopify", "entity": "orders"}, 
+        {"$set": shopify_outbound}, 
+        upsert=True
+    )
 
-    logger.info("✅ Database seeded with mapping rules successfully.")
+    logger.info("✅ Database seeded with dynamic mapping rules in 'mappings' collection.")
     client.close()
 
 if __name__ == "__main__":

@@ -6,13 +6,12 @@ from confluent_kafka import Consumer, KafkaError
 from app.config.settings import get_settings
 from app.utils.shopify_pusher import ShopifyDataPusher
 
-# Setup logging
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-# Kafka Consumer configuration for the outbound push queue
 consumer_conf = {
     "bootstrap.servers": settings.kafka_bootstrap_servers,
     "group.id": f"{settings.kafka_group_id}-push-workers",
@@ -21,7 +20,6 @@ consumer_conf = {
 }
 
 consumer = Consumer(consumer_conf)
-# Subscribe to any topic pushing back to Shopify (e.g., shopify.push.orders, shopify.push.products)
 consumer.subscribe(["^shopify\\.push\\..*$"])
 
 logger.info("Starting Outbound Push Consumer Worker...")
@@ -54,7 +52,7 @@ try:
 
         logger.info("Pushing %s to %s...", entity_name, target_shop)
 
-        # Call Shopify API to push data
+    
         result = ShopifyDataPusher.push_entity(
             shop_domain=target_shop,
             access_token=target_token,
@@ -65,11 +63,11 @@ try:
 
         if result:
             logger.info("✅ Successfully pushed %s!", entity_name)
+            time.sleep(2.0)
+            consumer.commit(asynchronous=False)
         else:
-            logger.error("❌ Failed to push %s. Payload might be invalid or item exists.", entity_name)
-
-        time.sleep(1.0) # Crucial: Sleep to respect Shopify's 2 requests/second REST API limit
-        consumer.commit(asynchronous=False)
+            logger.error("❌ Failed to push %s. The message will be retried after a delay.", entity_name)
+            time.sleep(10.0)
 
 except KeyboardInterrupt:
     logger.info("Push Consumer interrupted by user.")

@@ -13,6 +13,7 @@ from app.database import get_mongo_db, close_mongo_connection
 from app.auth.shopify_oauth import ShopifyOAuth2
 from app.utils.shopify_api import ShopifyAPI
 from app.utils.kafka_utils import get_kafka_producer, push_to_kafka
+from mapping_utils import prepare_shopify_order_for_push
 from app.utils.shopify_pusher import ShopifyDataPusher
 
 # Setup logging
@@ -23,18 +24,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # Pydantic Models for Validation
-class MappingPayload(BaseModel):
-    source: str = Field(..., description="The source system, e.g., 'shopify'")
-    entity: str = Field(..., description="The entity name, e.g., 'orders'")
-    primary_key: str = Field(..., description="The primary key field name in the standardized data")
-    mapping: dict = Field(..., description="The mapping rules dictionary")
-
-class PushPayload(BaseModel):
-    target_shop: str = Field(..., description="Target Shopify store domain (e.g., 'other-shop.myshopify.com')")
-    target_token: str = Field(..., description="Access token for the target store")
-    entity: str = Field(..., description="Entity to push (singular), e.g., 'product', 'customer'")
-    data: dict = Field(..., description="The data payload to push to the target store")
-
 class PushAllPayload(BaseModel):
     target_shop: str = Field(..., description="Target Shopify store domain (e.g., 'other-shop.myshopify.com')")
     target_token: str = Field(..., description="Access token for the target store")
@@ -182,29 +171,6 @@ def oauth_callback(
     )
 
 
-@app.get("/register-webhooks")
-def register_webhooks(shop: str = None):
-    """
-    Helper endpoint to manually re-register webhooks.
-    Useful when your ngrok URL changes.
-    """
-    if not shop:
-        raise HTTPException(status_code=400, detail="Missing shop parameter")
-
-    if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop):
-        raise HTTPException(status_code=400, detail="Invalid shop domain format")
-
-    token = oauth2.get_access_token(shop)
-    if not token:
-        raise HTTPException(status_code=400, detail="App not installed for this shop. Please go to /install first.")
-
-    api = ShopifyAPI(shop, token, settings.api_version)
-    w1 = api.ensure_webhook("orders/create", f"{settings.app_url}/webhooks/shopify/orders")
-    w2 = api.ensure_webhook("orders/updated", f"{settings.app_url}/webhooks/shopify/orders/updated")
-
-    return JSONResponse({"status": "success", "webhooks_registered": [w1, w2]})
-
-
 # ========================
 # Background Tasks
 # ========================
@@ -214,6 +180,8 @@ def process_entity_batch(records: list, shop: str, entity: str):
         record["shop_domain"] = shop
         record_id = str(record.get("id", "unknown"))
         push_to_kafka(kafka_producer, f"shopify.raw.{entity}", record, key=record_id)
+    # Flush the buffer to ensure all messages are delivered to Kafka
+    kafka_producer.flush()
 
 # ========================
 # Sync Endpoints
@@ -236,7 +204,7 @@ async def sync_entity(
     if not re.match(r"^[a-zA-Z0-9-]+\.myshopify\.com$", shop):
         raise HTTPException(status_code=400, detail="Invalid shop domain format")
         
-    valid_entities = ["orders", "products", "customers"]
+    valid_entities = ["orders"]
     if entity not in valid_entities:
         raise HTTPException(status_code=400, detail=f"Unsupported entity: {entity}. Must be one of {valid_entities}.")
         
@@ -255,9 +223,7 @@ async def sync_entity(
     # --- New Validation Block ---
     # Validate that the store has granted the necessary permissions (scopes) to fetch this entity.
     required_scopes_for_entity = {
-        "orders": "read_orders",
-        "products": "read_products",
-        "customers": "read_customers",
+        "orders": "read_orders"
     }
     required_scope = required_scopes_for_entity.get(entity)
     if required_scope and required_scope not in granted_scopes:
@@ -338,7 +304,7 @@ async def receive_shopify_order(
     
     def process_webhook():
         push_to_kafka(kafka_producer, "shopify.raw.orders", payload, key=order_id)
-        # Removed flush() to prevent blocking FastAPI's worker threads under high load
+        kafka_producer.poll(0) # Triggers delivery callbacks without blocking like flush()
 
     background_tasks.add_task(process_webhook)
 
@@ -357,133 +323,38 @@ async def receive_shopify_order_updated(
     
     def process_webhook():
         push_to_kafka(kafka_producer, "shopify.raw.orders.updated", payload, key=order_id)
-        # Removed flush() to prevent blocking FastAPI's worker threads under high load
+        kafka_producer.poll(0)
 
     background_tasks.add_task(process_webhook)
 
     return JSONResponse({"status": "accepted"})
 
 
-# ========================
-# Mappings Endpoints
-# ========================
-@app.get("/mappings")
-async def get_all_mappings():
-    """Retrieve all source mappings from MongoDB."""
-    mappings_collection = db[settings.mongo_collection_mappings]
-    mappings = list(mappings_collection.find({}, {"_id": 0}))
-    return JSONResponse({"status": "success", "mappings": mappings})
 
-@app.get("/mappings/{source}/{entity}")
-async def get_mapping(source: str, entity: str):
-    """Retrieve a specific mapping from MongoDB."""
-    mappings_collection = db[settings.mongo_collection_mappings]
-    mapping = mappings_collection.find_one({"source": source, "entity": entity}, {"_id": 0})
-    if not mapping:
-        raise HTTPException(status_code=404, detail="Mapping not found")
-    return JSONResponse({"status": "success", "mapping": mapping})
+# Simple in-memory cache for outbound mapping rules
+outbound_mapping_cache = {}
 
-@app.post("/mappings")
-async def create_or_update_mapping(payload: MappingPayload):
-    """
-    Create or update a source mapping dynamically.
-    Example Payload:
-    {
-        "source": "shopify",
-        "entity": "orders",
-        "primary_key": "ext_order_id",
-        "mapping": { ... }
-    }
-    """
-    source = payload.source
-    entity = payload.entity
-    
-    mappings_collection = db[settings.mongo_collection_mappings]
-    mappings_collection.update_one(
-        {"source": source, "entity": entity},
-        {"$set": payload.model_dump()},
-        upsert=True
-    )
-    return JSONResponse({"status": "success", "message": f"Mapping for {source} -> {entity} saved successfully"})
-
-# ========================
-# Push Endpoints
-# ========================
-@app.post("/push-to-store")
-async def push_data_to_store(payload: PushPayload):
-    """
-    Pushes data to a different Shopify account using the static ShopifyDataPusher class.
-    """
-    result = ShopifyDataPusher.push_entity(
-        shop_domain=payload.target_shop,
-        access_token=payload.target_token,
-        api_version=settings.api_version,
-        entity_name=payload.entity,
-        entity_data=payload.data
-    )
-
-    if result is None:
-        raise HTTPException(status_code=500, detail=f"Failed to push {payload.entity} to {payload.target_shop}")
-
-    return JSONResponse({"status": "success", "data": result})
-
-# ========================
 # Bulk Push All Endpoints
-# ========================
-def set_nested_value(data: dict, path: str, value):
-    """Helper to set nested dictionary values using dot notation."""
-    if not path: return
-    parts = path.split('.')
-    current = data
-    for part in parts[:-1]:
-        if part not in current or not isinstance(current[part], dict):
-            current[part] = {}
-        current = current[part]
-    current[parts[-1]] = value
-
-def reverse_map_entity(ekyam_data: dict, mapping_config: dict) -> dict:
-    """Converts Ekyam standardized data back to the source system format."""
-    raw_data = {}
-    for ekyam_field, rule in mapping_config.get("fields", {}).items():
-        if ekyam_field not in ekyam_data or ekyam_data[ekyam_field] is None: continue
-        val = ekyam_data[ekyam_field]
-        path = rule if isinstance(rule, str) else rule.get("path")
-        if path: set_nested_value(raw_data, path, val)
-
-    for list_field, list_config in mapping_config.get("lists", {}).items():
-        if list_field not in ekyam_data or not ekyam_data[list_field]: continue
-        ekyam_list = ekyam_data[list_field]
-        target_path = list_config.get("path", "")
-        raw_list = []
-        for item in ekyam_list:
-            mapped_item = {}
-            for item_ekyam_field, rule in list_config.get("fields", {}).items():
-                if item_ekyam_field not in item or item[item_ekyam_field] is None: continue
-                val = item[item_ekyam_field]
-                item_path = rule if isinstance(rule, str) else rule.get("path")
-                if item_path: set_nested_value(mapped_item, item_path, val)
-            raw_list.append(mapped_item)
-        if target_path: set_nested_value(raw_data, target_path, raw_list)
-    return raw_data
-
 def process_bulk_push(records: list, target_shop: str, target_token: str, entity: str):
-    """Background task to map and push all records to Shopify."""
-    mappings_collection = db[settings.mongo_collection_mappings]
+   
+    mappings_collection = db["mappings"]
+    
+    cache_key = f"outbound_shopify_{entity}"
+    if cache_key not in outbound_mapping_cache:
+        outbound_mapping_cache[cache_key] = mappings_collection.find_one({"direction": "outbound", "target_system": "shopify", "entity": entity})
+        
+    mapping_config = outbound_mapping_cache[cache_key]
+    
+    if not mapping_config:
+        logger.error(f"No outbound mapping configuration found for target 'shopify' and entity '{entity}'")
+        return
+        
     for record in records:
-        source = record.get("source_system", "shopify")
-        mapping_doc = mappings_collection.find_one({"source": source, "entity": entity})
-        if not mapping_doc or "mapping" not in mapping_doc:
+        if entity != "orders":
+            logger.warning(f"Simple reverse mapping not implemented for entity: {entity}")
             continue
             
-        raw_shopify_payload = reverse_map_entity(record, mapping_doc["mapping"])
-        raw_shopify_payload.pop("id", None)
-        raw_shopify_payload.pop("shop_domain", None)
-        
-        if "line_items" in raw_shopify_payload:
-            for item in raw_shopify_payload["line_items"]:
-                if "title" not in item:
-                    item["title"] = item.get("sku", "Custom Product")
-                    
+        raw_shopify_payload = prepare_shopify_order_for_push(record, mapping_config)
         entity_singular = entity[:-1] if entity.endswith("s") else entity
         
         # Construct message for Kafka
@@ -496,15 +367,16 @@ def process_bulk_push(records: list, target_shop: str, target_token: str, entity
         
         # Push to Kafka instead of Shopify directly
         push_to_kafka(kafka_producer, f"shopify.push.{entity}", push_message)
+        
+    kafka_producer.flush()
 
 @app.post("/push-all-to-store/{entity}")
 async def push_all_data_to_store(entity: str, payload: PushAllPayload, background_tasks: BackgroundTasks):
-    """Fetches all standardized data from MongoDB and pushes to the target store."""
-    valid_entities = ["orders", "products", "customers"]
+    valid_entities = ["orders"]
     if entity not in valid_entities:
         raise HTTPException(status_code=400, detail=f"Unsupported entity: {entity}. Must be one of {valid_entities}.")
         
-    collection_name = settings.mongo_collection_orders if entity == "orders" else f"ekyam_{entity}"
+    collection_name = settings.mongo_collection_orders
     collection = db[collection_name]
     records = list(collection.find({}, {"_id": 0}))
     
