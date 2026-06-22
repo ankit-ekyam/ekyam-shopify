@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 def set_nested_value(data: dict, path: str, value):
     """Helper to set nested dictionary values using dot notation."""
     if not path or value is None: return
@@ -9,7 +13,7 @@ def set_nested_value(data: dict, path: str, value):
         current = current[part]
     current[parts[-1]] = value
 
-def map_dynamic_outbound(ekyam_order: dict, config: dict) -> dict:
+def map_dynamic_destination(ekyam_order: dict, config: dict) -> dict:
     
     target_payload = {}
     mapping = config.get("mapping", {})
@@ -40,7 +44,7 @@ def map_dynamic_outbound(ekyam_order: dict, config: dict) -> dict:
 
 def prepare_shopify_order_for_push(ekyam_order: dict, mapping_config: dict) -> dict:
   
-    shopify_order = map_dynamic_outbound(ekyam_order, mapping_config)
+    shopify_order = map_dynamic_destination(ekyam_order, mapping_config)
     
     shopify_order.pop("id", None)
     shopify_order.pop("shop_domain", None)
@@ -55,3 +59,45 @@ def prepare_shopify_order_for_push(ekyam_order: dict, mapping_config: dict) -> d
                 item["name"] = fallback_name
                 
     return shopify_order
+
+def get_nested_value(data: dict, path: str, default=None):
+    """Helper to extract nested dictionary values using dot notation."""
+    if not path: return default
+    val = data
+    for key in path.split('.'):
+        if isinstance(val, dict):
+            val = val.get(key)
+        else:
+            return default
+    return val if val is not None else default
+
+class DataTransformers:
+    """Small helper functions used by mapping rules."""
+    
+    @staticmethod
+    def divide(numerator, denominator):
+        """Return numerator / denominator as a float."""
+        try:
+            return float(numerator) / float(denominator)
+        except (ValueError, TypeError, ZeroDivisionError):
+            return 0.0
+
+def _apply_rule(rule, data_source):
+    """
+    Get a value from data_source using a mapping rule.
+
+    A rule can be either:
+    - a string path, such as "customer.id"
+    - a transformer rule, such as {"transformer": "divide", "paths": ["price", "quantity"]}
+    """
+    if not isinstance(rule, dict) or "transformer" not in rule:
+        return get_nested_value(data_source, rule)
+
+    t_name = rule["transformer"]
+    func = getattr(DataTransformers, t_name, None)
+
+    if func:
+        return func(*[get_nested_value(data_source, p) for p in rule.get("paths", [])])
+
+    logger.warning(f"Transformer '{t_name}' not found in DataTransformers class.")
+    return None

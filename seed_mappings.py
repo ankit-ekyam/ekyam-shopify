@@ -12,9 +12,9 @@ def seed_mappings():
     db = client[settings.mongo_db]
     mappings_collection = db["mappings"]
 
-    # 1. Shopify Inbound Mapping (Shopify -> Ekyam)
-    shopify_inbound = {
-        "direction": "inbound",
+    # 1. Shopify Source Mapping (Shopify -> Ekyam)
+    shopify_source = {
+        "direction": "source",
         "source_system": "shopify",
         "entity": "orders",
         "mapping": {
@@ -33,16 +33,19 @@ def seed_mappings():
                         "ext_product_id": "product_id",
                         "sku": "sku",
                         "quantity": "quantity",
-                        "unit_price": "price"
+                        "unit_price": {
+                            "transformer": "divide",
+                            "paths": ["price", "quantity"]
+                        }
                     }
                 }
             }
         }
     }
 
-    # 2. Shopify Outbound Mapping (Ekyam -> Shopify)
-    shopify_outbound = {
-        "direction": "outbound",
+    # 2. Shopify Destination Mapping (Ekyam -> Shopify)
+    shopify_destination = {
+        "direction": "destination",
         "target_system": "shopify",
         "entity": "orders",
         "mapping": {
@@ -69,13 +72,13 @@ def seed_mappings():
 
     # Insert the rules into the DB
     mappings_collection.update_one(
-        {"direction": "inbound", "source_system": "shopify", "entity": "orders"}, 
-        {"$set": shopify_inbound}, 
+        {"direction": "source", "source_system": "shopify", "entity": "orders"}, 
+        {"$set": shopify_source}, 
         upsert=True
     )
     mappings_collection.update_one(
-        {"direction": "outbound", "target_system": "shopify", "entity": "orders"}, 
-        {"$set": shopify_outbound}, 
+        {"direction": "destination", "target_system": "shopify", "entity": "orders"}, 
+        {"$set": shopify_destination}, 
         upsert=True
     )
 

@@ -22,7 +22,7 @@ consumer_conf = {
 consumer = Consumer(consumer_conf)
 consumer.subscribe(["^shopify\\.push\\..*$"])
 
-logger.info("Starting Outbound Push Consumer Worker...")
+logger.info("Starting Destination Push Consumer Worker...")
 
 try:
     while True:

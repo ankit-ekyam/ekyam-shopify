@@ -6,7 +6,7 @@ from confluent_kafka import Consumer, KafkaError
 from pymongo import MongoClient, UpdateOne
 
 from app.config.settings import get_settings
-
+from mapping_utils import get_nested_value, _apply_rule
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -34,18 +34,8 @@ mappings_collection = db["mappings"]
 # Create primary key index for performance
 orders_collection.create_index("ext_order_id", unique=True)
 
-def get_nested_value(data: dict, path: str, default=None):
-    """Helper to extract nested dictionary values using dot notation."""
-    if not path: return default
-    val = data
-    for key in path.split('.'):
-        if isinstance(val, dict):
-            val = val.get(key)
-        else:
-            return default
-    return val if val is not None else default
 
-def map_dynamic_inbound(raw_data: dict, config: dict, source_system: str) -> dict:
+def map_dynamic_source(raw_data: dict, config: dict, source_system: str) -> dict:
     """Dynamically maps source data to Ekyam standard using MongoDB rules."""
     ekyam_order = {
         "processed_at": datetime.now(UTC).isoformat(),
@@ -58,9 +48,9 @@ def map_dynamic_inbound(raw_data: dict, config: dict, source_system: str) -> dic
     
     
     #this loops over mappings collections of mongodb
-    for ekyam_field, path in mapping.get("fields", {}).items():
-    
-        val = get_nested_value(raw_data, path)
+    for ekyam_field, rule in mapping.get("fields", {}).items():
+        # Use the new helper function for the main fields
+        val = _apply_rule(rule, raw_data)
         if val is not None:
             if ekyam_field == "order_total_amt": val = float(val)
             elif ekyam_field in ["ext_order_id", "customer_id"]: val = str(val)
@@ -72,8 +62,9 @@ def map_dynamic_inbound(raw_data: dict, config: dict, source_system: str) -> dic
         raw_list = get_nested_value(raw_data, list_config.get("path"), [])
         for item in raw_list:
             mapped_item = {}
-            for item_ekyam_field, path in list_config.get("fields", {}).items():
-                val = get_nested_value(item, path)
+            for item_ekyam_field, rule in list_config.get("fields", {}).items():
+                # Use the same helper function for fields inside a list
+                val = _apply_rule(rule, item)
                 if val is not None:
                     if item_ekyam_field == "unit_price": val = float(val)
                     elif item_ekyam_field == "quantity": val = int(val)
@@ -121,12 +112,12 @@ try:
             
             try:
                 # 1. Fetch Mapping Config (Using Cache)
-                cache_key = f"inbound_{source_system}_orders"
+                cache_key = f"source_{source_system}_orders"
                 
                 if cache_key not in mapping_cache:
                     # Only hit MongoDB if it's NOT in the cache
                     mapping_cache[cache_key] = mappings_collection.find_one({
-                        "direction": "inbound", 
+                        "direction": "source", 
                         "source_system": source_system, 
                         "entity": "orders"
                     })
@@ -138,7 +129,7 @@ try:
                     continue
 
                 # 2. Standardize dynamically
-                standardized_data = map_dynamic_inbound(raw_data, config, source_system)
+                standardized_data = map_dynamic_source(raw_data, config, source_system)
 
                 # 3. Add to Database Queue
                 if standardized_data.get("ext_order_id"):

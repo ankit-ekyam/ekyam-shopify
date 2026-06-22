@@ -27,6 +27,8 @@ settings = get_settings()
 class PushAllPayload(BaseModel):
     target_shop: str = Field(..., description="Target Shopify store domain (e.g., 'other-shop.myshopify.com')")
     target_token: str = Field(..., description="Access token for the target store")
+    min_price: float | None = Field(None, description="Optional filter to only push orders with a total amount >= this value")
+    max_price: float | None = Field(None, description="Optional filter to only push orders with a total amount <= this value")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -331,22 +333,22 @@ async def receive_shopify_order_updated(
 
 
 
-# Simple in-memory cache for outbound mapping rules
-outbound_mapping_cache = {}
+# Simple in-memory cache for destination mapping rules
+destination_mapping_cache = {}
 
 # Bulk Push All Endpoints
 def process_bulk_push(records: list, target_shop: str, target_token: str, entity: str):
    
     mappings_collection = db["mappings"]
     
-    cache_key = f"outbound_shopify_{entity}"
-    if cache_key not in outbound_mapping_cache:
-        outbound_mapping_cache[cache_key] = mappings_collection.find_one({"direction": "outbound", "target_system": "shopify", "entity": entity})
+    cache_key = f"destination_shopify_{entity}"
+    if cache_key not in destination_mapping_cache:
+        destination_mapping_cache[cache_key] = mappings_collection.find_one({"direction": "destination", "target_system": "shopify", "entity": entity})
         
-    mapping_config = outbound_mapping_cache[cache_key]
+    mapping_config = destination_mapping_cache[cache_key]
     
     if not mapping_config:
-        logger.error(f"No outbound mapping configuration found for target 'shopify' and entity '{entity}'")
+        logger.error(f"No destination mapping configuration found for target 'shopify' and entity '{entity}'")
         return
         
     for record in records:
@@ -378,7 +380,17 @@ async def push_all_data_to_store(entity: str, payload: PushAllPayload, backgroun
         
     collection_name = settings.mongo_collection_orders
     collection = db[collection_name]
-    records = list(collection.find({}, {"_id": 0}))
+    
+   
+    query = {}
+    if payload.min_price is not None or payload.max_price is not None:
+        query["order_total_amt"] = {}
+        if payload.min_price is not None:
+            query["order_total_amt"]["$gte"] = payload.min_price
+        if payload.max_price is not None:
+            query["order_total_amt"]["$lte"] = payload.max_price
+        
+    records = list(collection.find(query, {"_id": 0}))
     
     if not records:
         return JSONResponse({"status": "success", "message": f"No {entity} found in database to push."})
