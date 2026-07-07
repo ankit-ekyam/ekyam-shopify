@@ -386,3 +386,5 @@ use ekyam
 show collections 
 db.shopify_stores.find().pretty()
 db.shopify_orders.find().pretty()
+
+# ekyam-shopify
